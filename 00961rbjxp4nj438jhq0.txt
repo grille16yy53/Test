@@ -1,0 +1,498 @@
+
+loadstring(game:HttpGet('https://raw.githubusercontent.com/sametcetinkaya1447/planecrazy2/refs/heads/main/folder/pcutils.lua'))()
+
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local character = player.Character or player.CharacterAdded:Wait()
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+local SETTINGS = {
+	UpperLegLen = 5.5,
+	LowerLegLen = 5.5,
+	BodyHeight = 7,
+	LegRestLength = 4.5,
+
+	WalkSpeed = 14,
+	RunSpeed = 22,
+	RotationSpeed = 5,
+	Acceleration = 4,
+
+	MinHeight = 2,
+	MaxHeight = 10,
+	HeightChangeSpeed = 6,
+
+	MaxPitch = math.rad(20),
+	MaxRoll = math.rad(12),
+	TiltSpeed = 3,
+
+	StepDistance = 3.5,
+	StepHeight = 2.5,
+	StepDuration = 0.22,
+	StepOvershoot = 1.2,
+
+	JumpChargeTime = 1.2,
+	JumpMinPower   = 30,
+	JumpMaxPower   = 80,
+	JumpForward    = 40,
+	Gravity        = 100,
+	LandSmashDip   = 1.5,
+	LandSmashTime  = 0.25,
+}
+
+-- ── AIRCRAFT PARTS ──────────────────────────────────────────────
+local characterName = "Ru2ez9z8dh"
+local myAircraft = workspace:FindFirstChild(characterName .. " Aircraft")
+if not myAircraft then
+	warn("Aircraft not found: " .. characterName .. " Aircraft")
+end
+
+-- Collect parts by your naming convention
+-- fingerparts1 (black Posts)       → upper legs  (6 needed)
+-- fingerparts2 (blue Posts)        → lower legs  (6 needed)
+-- fingerparts3 (black SmallParts)  → feet        (6 needed)
+-- torsopart (black BlockStd)       → body
+
+local fingerparts1 = {} -- upper legs
+local fingerparts2 = {} -- lower legs
+local fingerparts3 = {} -- feet
+local torsopart    = nil
+
+if myAircraft then
+	for _, v in pairs(myAircraft:GetDescendants()) do
+		if v.Name == "Post" and v.Parent.Name == "Post" then
+			if v.Color == Color3.fromRGB(0, 0, 0) then
+				table.insert(fingerparts1, v)
+			elseif v.Color == Color3.fromRGB(0, 0, 1) then
+				table.insert(fingerparts2, v)
+			end
+		elseif v.Name == "Part" and v.Parent.Name == "SmallPart" and v.Color == Color3.fromRGB(0, 0, 0) then
+			table.insert(fingerparts3, v)
+		elseif v.Name == "BlockStd" and v.Parent.Name == "BlockStd" and v.Color == Color3.fromRGB(0, 0, 0) then
+			if not torsopart then
+				torsopart = v
+			end
+		end
+	end
+end
+
+-- Make all aircraft parts non-collide and zero gravity
+if myAircraft then
+	for _, part in pairs(myAircraft:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = false
+			part.Anchored = false
+			part.CanQuery = false
+		end
+	end
+end
+
+-- ── MOVER CACHE ──────────────────────────────────────────────────
+local cachedMovers = {}
+
+local function getMovers(part)
+	if cachedMovers[part] then
+		return cachedMovers[part].pos, cachedMovers[part].gyro
+	end
+
+	-- Zero-gravity counterforce
+	local bf = Instance.new("BodyForce")
+	bf.Name = "AntiGrav"
+	bf.Force = Vector3.new(0, part:GetMass() * workspace.Gravity, 0)
+	bf.Parent = part
+
+	local bPos = Instance.new("BodyPosition")
+	bPos.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+	bPos.P = 50000
+	bPos.D = 800
+	bPos.Parent = part
+
+	local bGyro = Instance.new("BodyGyro")
+	bGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+	bGyro.P = 30000
+	bGyro.D = 500
+	bGyro.Parent = part
+
+	cachedMovers[part] = { pos = bPos, gyro = bGyro }
+	return bPos, bGyro
+end
+
+local function updateMover(part, targetCF, offsetCF)
+	if not part then return end
+	local final = offsetCF and (targetCF * offsetCF) or targetCF
+	local bPos, bGyro = getMovers(part)
+	bPos.Position = final.Position
+	bGyro.CFrame   = final
+end
+
+-- ── INVISIBLE PROXY MODEL ────────────────────────────────────────
+local mechName = "Urgot_Mech"
+if workspace:FindFirstChild(mechName) then workspace[mechName]:Destroy() end
+local mechModel = Instance.new("Model")
+mechModel.Name = mechName
+mechModel.Parent = workspace
+
+local function createPart(size, name)
+	local p = Instance.new("Part")
+	p.Size = size
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CastShadow = false
+	p.Transparency = 1       -- invisible proxy
+	p.Name = name
+	p.Parent = mechModel
+	return p
+end
+
+-- Body proxy (drives torsopart)
+local Body = createPart(Vector3.new(8, 4, 9), "Body")
+
+-- 6 leg proxies each: upper, lower, foot
+local LEG_DATA = {
+	{name="L_Front", group=0, hipOffset=Vector3.new(-3,   -1.5, -4),  restDir=Vector3.new(-0.6, 0, -0.8).Unit},
+	{name="L_Mid",   group=1, hipOffset=Vector3.new(-4.5, -1.5,  0),  restDir=Vector3.new(-1,   0,  0)},
+	{name="L_Back",  group=0, hipOffset=Vector3.new(-3,   -1.5,  4),  restDir=Vector3.new(-0.6, 0,  0.8).Unit},
+	{name="R_Front", group=1, hipOffset=Vector3.new( 3,   -1.5, -4),  restDir=Vector3.new( 0.6, 0, -0.8).Unit},
+	{name="R_Mid",   group=0, hipOffset=Vector3.new( 4.5, -1.5,  0),  restDir=Vector3.new( 1,   0,  0)},
+	{name="R_Back",  group=1, hipOffset=Vector3.new( 3,   -1.5,  4),  restDir=Vector3.new( 0.6, 0,  0.8).Unit},
+}
+
+local legs = {}
+for i, data in ipairs(LEG_DATA) do
+	table.insert(legs, {
+		data      = data,
+		upper     = createPart(Vector3.new(1.4, SETTINGS.UpperLegLen, 1.4), data.name.."_Upper"),
+		lower     = createPart(Vector3.new(1.0, SETTINGS.LowerLegLen, 1.0), data.name.."_Lower"),
+		foot      = createPart(Vector3.new(1.8, 0.4, 2.2),                  data.name.."_Foot"),
+		footPos   = Vector3.new(),
+		idealPos  = Vector3.new(),
+		stepStart = Vector3.new(),
+		stepEnd   = Vector3.new(),
+		stepAlpha = 1,
+		stepping  = false,
+	})
+end
+
+-- ── TOOL ────────────────────────────────────────────────────────
+local tool = Instance.new("Tool")
+tool.Name = "Urgot Controller"
+tool.RequiresHandle = false
+tool.CanBeDropped = false
+tool.Parent = player.Backpack
+
+local isEquipped = false
+tool.Equipped:Connect(function()   isEquipped = true  end)
+tool.Unequipped:Connect(function() isEquipped = false end)
+
+-- ── GROUP STEPPING ───────────────────────────────────────────────
+local GROUP        = { [0]={1,5,3}, [1]={4,2,6} }
+local groupActive  = { [0]=false, [1]=false }
+
+-- ── STATE ────────────────────────────────────────────────────────
+local spawnOffset   = rootPart.CFrame.RightVector * 12
+local targetHeight  = SETTINGS.BodyHeight
+local currentHeight = SETTINGS.BodyHeight
+local mechPos       = rootPart.Position + spawnOffset + Vector3.new(0, currentHeight, 0)
+local mechRot       = 0
+local currentPitch  = 0
+local currentRoll   = 0
+local velocity      = Vector3.new()
+local headYaw       = 0
+local headPitch     = 0
+local groundY       = mechPos.Y - currentHeight
+local smoothGroundY = groundY
+local isAirborne    = false
+local vertVel       = 0
+local jumpCharge    = 0
+local isCharging    = false
+local landDipTimer  = 0
+local chargeCrouch  = 0
+
+-- ── HELPERS ──────────────────────────────────────────────────────
+local rayParams = RaycastParams.new()
+rayParams.FilterDescendantsInstances = {character, mechModel, myAircraft}
+
+local function groundRaycast(pos)
+	local res = workspace:Raycast(Vector3.new(pos.X, pos.Y + 20, pos.Z), Vector3.new(0, -200, 0), rayParams)
+	return res and res.Position.Y or (pos.Y - 50)
+end
+
+local function floorRaycast(pos)
+	local res = workspace:Raycast(pos + Vector3.new(0, 10, 0), Vector3.new(0, -35, 0), rayParams)
+	return res and res.Position or Vector3.new(pos.X, groundY, pos.Z)
+end
+
+local function positionLimbProxy(part, p0, p1)
+	part.CFrame = CFrame.lookAt((p0 + p1) / 2, p1) * CFrame.Angles(math.pi/2, 0, 0)
+end
+
+local function lerpAngle(a, b, t)
+	return a + math.atan2(math.sin(b - a), math.cos(b - a)) * t
+end
+
+local function solveIK(hip, foot, l1, l2, forwardVec)
+	local dist  = math.clamp((foot - hip).Magnitude, 0.1, l1 + l2 - 0.01)
+	local alpha = math.acos(math.clamp((l1^2 + dist^2 - l2^2) / (2*l1*dist), -1, 1))
+	local linePos  = hip + (foot - hip).Unit * (math.cos(alpha) * l1)
+	local legAxis  = (foot - hip).Unit
+	local rightAxis = legAxis:Cross(forwardVec)
+	if rightAxis.Magnitude < 0.001 then rightAxis = Vector3.new(1,0,0) end
+	rightAxis = rightAxis.Unit
+	return linePos + rightAxis:Cross(legAxis).Unit * (math.sin(alpha) * l1)
+end
+
+-- Init feet positions
+mechPos = Vector3.new(mechPos.X, groundRaycast(mechPos) + currentHeight, mechPos.Z)
+groundY = mechPos.Y - currentHeight
+smoothGroundY = groundY
+for _, leg in ipairs(legs) do
+	leg.footPos = mechPos + leg.data.restDir * SETTINGS.LegRestLength
+	leg.footPos = floorRaycast(leg.footPos)
+end
+
+-- ── OFFSETS for aircraft parts ───────────────────────────────────
+-- Tweak these if your parts are offset from the proxy center
+local BODY_OFFSET  = CFrame.new(0, 0, 0)
+local UPPER_OFFSET = CFrame.new(0, 0, 0)
+local LOWER_OFFSET = CFrame.new(0, 0, 0)
+local FOOT_OFFSET  = CFrame.new(0, 0, 0)
+
+-- ── MAIN LOOP ────────────────────────────────────────────────────
+RunService.RenderStepped:Connect(function(dt)
+	local targetVel    = Vector3.new()
+	local currentSpeed = SETTINGS.WalkSpeed
+
+	-- INPUT
+	local fHeld = isEquipped and UserInputService:IsKeyDown(Enum.KeyCode.F)
+
+	if isEquipped then
+		if not isAirborne then
+			if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+				targetHeight = math.max(SETTINGS.MinHeight, targetHeight - SETTINGS.HeightChangeSpeed * dt)
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+				targetHeight = math.min(SETTINGS.MaxHeight, targetHeight + SETTINGS.HeightChangeSpeed * dt)
+			end
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+			currentSpeed = SETTINGS.RunSpeed
+		end
+
+		local dirToMouse = mouse.Hit.Position - mechPos
+		mechRot = lerpAngle(mechRot, math.atan2(-dirToMouse.X, -dirToMouse.Z), dt * SETTINGS.RotationSpeed)
+		local hDist = Vector2.new(dirToMouse.X, dirToMouse.Z).Magnitude
+		currentPitch = lerpAngle(currentPitch,
+			math.clamp(math.atan2(dirToMouse.Y, hDist), -SETTINGS.MaxPitch, SETTINGS.MaxPitch),
+			dt * SETTINGS.TiltSpeed)
+
+		local bodyCFFlat = CFrame.new(mechPos) * CFrame.Angles(0, mechRot, 0)
+		local localDir = bodyCFFlat:VectorToObjectSpace(dirToMouse)
+		headYaw   = lerpAngle(headYaw,   math.atan2(-localDir.X, -localDir.Z), dt * 8)
+		headPitch = lerpAngle(headPitch,
+			math.clamp(math.atan2(localDir.Y, Vector2.new(localDir.X, localDir.Z).Magnitude), math.rad(-40), math.rad(40)),
+			dt * 8)
+
+		if not isAirborne then
+			local fwd   = CFrame.Angles(0, mechRot, 0).LookVector
+			local right = CFrame.Angles(0, mechRot, 0).RightVector
+			local inputDir = Vector3.new()
+			if UserInputService:IsKeyDown(Enum.KeyCode.W) then inputDir += fwd   end
+			if UserInputService:IsKeyDown(Enum.KeyCode.S) then inputDir -= fwd   end
+			if UserInputService:IsKeyDown(Enum.KeyCode.A) then inputDir -= right end
+			if UserInputService:IsKeyDown(Enum.KeyCode.D) then inputDir += right end
+			if inputDir.Magnitude > 0 then targetVel = inputDir.Unit * currentSpeed end
+		end
+
+		-- Jump charge
+		if fHeld and not isAirborne then
+			isCharging = true
+			jumpCharge = math.min(jumpCharge + dt / SETTINGS.JumpChargeTime, 1)
+		elseif isCharging and not fHeld and not isAirborne then
+			isCharging = false
+			isAirborne = true
+			local power = SETTINGS.JumpMinPower + (SETTINGS.JumpMaxPower - SETTINGS.JumpMinPower) * jumpCharge
+			vertVel = power
+			local fwd = CFrame.Angles(0, mechRot, 0).LookVector
+			velocity = velocity + fwd * (SETTINGS.JumpForward * jumpCharge)
+			jumpCharge = 0
+		elseif not fHeld then
+			isCharging = false
+			jumpCharge = math.max(jumpCharge - dt * 3, 0)
+		end
+	else
+		currentPitch = lerpAngle(currentPitch, 0, dt * SETTINGS.TiltSpeed)
+		currentRoll  = lerpAngle(currentRoll,  0, dt * SETTINGS.TiltSpeed)
+		headYaw      = lerpAngle(headYaw,   0, dt * 4)
+		headPitch    = lerpAngle(headPitch, 0, dt * 4)
+		isCharging   = false
+		jumpCharge   = math.max(jumpCharge - dt * 3, 0)
+	end
+
+	chargeCrouch = chargeCrouch + (jumpCharge - chargeCrouch) * math.min(dt * 6, 1)
+
+	-- PHYSICS
+	if isAirborne then
+		vertVel = vertVel - SETTINGS.Gravity * dt
+		velocity = velocity:Lerp(targetVel * 0.3, math.min(SETTINGS.Acceleration * 0.3 * dt, 1))
+		mechPos = mechPos + velocity * dt + Vector3.new(0, vertVel * dt, 0)
+
+		local gY = groundRaycast(mechPos)
+		if mechPos.Y - currentHeight <= gY then
+			mechPos = Vector3.new(mechPos.X, gY + currentHeight, mechPos.Z)
+			groundY = gY
+			smoothGroundY = gY
+			vertVel = 0
+			isAirborne = false
+			velocity = Vector3.new(velocity.X * 0.3, 0, velocity.Z * 0.3)
+			landDipTimer = SETTINGS.LandSmashTime
+			for _, leg in ipairs(legs) do
+				leg.stepping = false
+				leg.footPos = floorRaycast(leg.footPos)
+			end
+			groupActive[0] = false
+			groupActive[1] = false
+		end
+	else
+		velocity = velocity:Lerp(targetVel, math.min(SETTINGS.Acceleration * dt, 1))
+		mechPos = mechPos + velocity * dt
+
+		local rawGroundY = groundRaycast(mechPos)
+		local groundLerpSpeed = rawGroundY > smoothGroundY and 6 or 3
+		smoothGroundY = smoothGroundY + (rawGroundY - smoothGroundY) * math.min(groundLerpSpeed * dt, 1)
+
+		local dipAmount = 0
+		if landDipTimer > 0 then
+			landDipTimer = landDipTimer - dt
+			local t = 1 - math.max(landDipTimer / SETTINGS.LandSmashTime, 0)
+			dipAmount = math.sin(t * math.pi) * SETTINGS.LandSmashDip
+		end
+
+		local effectiveHeight = (targetHeight - chargeCrouch * targetHeight * 0.45) - dipAmount
+		currentHeight = currentHeight + (effectiveHeight - currentHeight) * math.min(dt * 5, 1)
+		mechPos = Vector3.new(mechPos.X, smoothGroundY + currentHeight, mechPos.Z)
+	end
+
+	local rightVec = CFrame.Angles(0, mechRot, 0).RightVector
+	currentRoll = lerpAngle(currentRoll,
+		math.clamp(velocity:Dot(rightVec) / SETTINGS.RunSpeed * SETTINGS.MaxRoll, -SETTINGS.MaxRoll, SETTINGS.MaxRoll),
+		dt * SETTINGS.TiltSpeed)
+
+	local chargePitchLean = chargeCrouch * math.rad(12)
+	local mechCF = CFrame.new(mechPos)
+		* CFrame.Angles(0, mechRot, 0)
+		* CFrame.Angles(currentPitch + chargePitchLean, 0, currentRoll)
+
+	local bob = 0
+	if not isAirborne and not isCharging and velocity.Magnitude > 0.5 then
+		bob = math.abs(math.sin(tick() * (velocity.Magnitude > SETTINGS.WalkSpeed and 14 or 10))) * 0.35
+	end
+	local visualCF = mechCF - Vector3.new(0, bob, 0)
+
+	-- Move proxy body and push to aircraft torso
+	Body.CFrame = visualCF
+	updateMover(torsopart, visualCF, BODY_OFFSET)
+
+	-- ── LEGS ─────────────────────────────────────────────────────
+	if isAirborne then
+		local tuck = math.min(math.abs(vertVel) / SETTINGS.JumpMaxPower, 1)
+		for i, leg in ipairs(legs) do
+			local hipWorld = visualCF:PointToWorldSpace(leg.data.hipOffset)
+			local tuckedTarget = hipWorld + leg.data.restDir * (SETTINGS.LegRestLength * (0.3 + 0.7 * (1 - tuck)))
+				- Vector3.new(0, 2 * tuck, 0)
+			leg.footPos = leg.footPos:Lerp(tuckedTarget, math.min(dt * 8, 1))
+			leg.stepping = false
+
+			local outDir = visualCF:VectorToWorldSpace(Vector3.new(leg.data.hipOffset.X, 0, leg.data.hipOffset.Z).Unit)
+			local knee   = solveIK(hipWorld, leg.footPos, SETTINGS.UpperLegLen, SETTINGS.LowerLegLen, outDir)
+
+			positionLimbProxy(leg.upper, hipWorld, knee)
+			positionLimbProxy(leg.lower, knee, leg.footPos)
+			leg.foot.CFrame = CFrame.new(leg.footPos) * CFrame.Angles(0, mechRot, 0) * CFrame.new(0, 0.2, 0)
+
+			-- Push to aircraft parts (index i = 1..6)
+			updateMover(fingerparts1[i], leg.upper.CFrame, UPPER_OFFSET)
+			updateMover(fingerparts2[i], leg.lower.CFrame, LOWER_OFFSET)
+			updateMover(fingerparts3[i], leg.foot.CFrame,  FOOT_OFFSET)
+		end
+	else
+		local lead = velocity * 0.35
+		for _, leg in ipairs(legs) do
+			local hipWorld = visualCF:PointToWorldSpace(leg.data.hipOffset)
+			local idealDir = visualCF:VectorToWorldSpace(leg.data.restDir)
+			leg.idealPos   = floorRaycast(hipWorld + idealDir * SETTINGS.LegRestLength + lead)
+		end
+
+		-- Release finished groups
+		for g = 0, 1 do
+			if groupActive[g] then
+				local allDone = true
+				for _, idx in ipairs(GROUP[g]) do
+					if legs[idx].stepping then allDone = false; break end
+				end
+				if allDone then groupActive[g] = false end
+			end
+		end
+
+		-- Start new group
+		if not groupActive[0] and not groupActive[1] and velocity.Magnitude > 0.5 then
+			local bestGroup = -1
+			local bestDrift = SETTINGS.StepDistance
+			for g = 0, 1 do
+				local maxDrift = 0
+				for _, idx in ipairs(GROUP[g]) do
+					local d = (legs[idx].footPos - legs[idx].idealPos).Magnitude
+					if d > maxDrift then maxDrift = d end
+				end
+				if maxDrift > bestDrift then bestDrift = maxDrift; bestGroup = g end
+			end
+
+			if bestGroup >= 0 then
+				groupActive[bestGroup] = true
+				for _, idx in ipairs(GROUP[bestGroup]) do
+					local leg = legs[idx]
+					leg.stepping  = true
+					leg.stepAlpha = 0
+					leg.stepStart = leg.footPos
+					local sv = leg.idealPos - leg.footPos
+					leg.stepEnd = leg.idealPos + (sv.Magnitude > 0.01 and sv.Unit or Vector3.new()) * SETTINGS.StepOvershoot
+				end
+			end
+		end
+
+		-- Advance arcs
+		for _, leg in ipairs(legs) do
+			if leg.stepping then
+				leg.stepAlpha += dt / SETTINGS.StepDuration
+				if leg.stepAlpha >= 1 then
+					leg.stepping = false
+					leg.footPos  = floorRaycast(leg.stepEnd)
+				else
+					leg.footPos = leg.stepStart:Lerp(leg.stepEnd, leg.stepAlpha)
+						+ Vector3.new(0, math.sin(leg.stepAlpha * math.pi) * SETTINGS.StepHeight, 0)
+				end
+			else
+				leg.footPos = leg.footPos:Lerp(floorRaycast(leg.footPos), 8 * dt)
+			end
+		end
+
+		-- IK render + push to aircraft
+		for i, leg in ipairs(legs) do
+			local hipWorld = visualCF:PointToWorldSpace(leg.data.hipOffset)
+			local outDir   = visualCF:VectorToWorldSpace(Vector3.new(leg.data.hipOffset.X, 0, leg.data.hipOffset.Z).Unit)
+			local knee     = solveIK(hipWorld, leg.footPos, SETTINGS.UpperLegLen, SETTINGS.LowerLegLen, outDir)
+
+			positionLimbProxy(leg.upper, hipWorld, knee)
+			positionLimbProxy(leg.lower, knee, leg.footPos)
+			leg.foot.CFrame = CFrame.new(leg.footPos) * CFrame.Angles(0, mechRot, 0) * CFrame.new(0, 0.2, 0)
+
+			-- Push to aircraft parts
+			updateMover(fingerparts1[i], leg.upper.CFrame, UPPER_OFFSET)
+			updateMover(fingerparts2[i], leg.lower.CFrame, LOWER_OFFSET)
+			updateMover(fingerparts3[i], leg.foot.CFrame,  FOOT_OFFSET)
+		end
+	end
+end)
