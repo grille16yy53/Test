@@ -4,7 +4,7 @@
 	grouped by bone (body + 4 legs split thigh/shin) so the legs move with 2-bone IK.
 
 	HOW TO USE (same flow as alya1):
-	  1) MODE = "build"  -> run on the UNSPAWNED plot (needs >= 1400 SmallParts). Paints + resizes. Re-run if any are missing.
+	  1) MODE = "run"  -> run on the UNSPAWNED plot (needs >= 1400 SmallParts). Paints + resizes. Re-run if any are missing.
 	  2) Spawn the plane. Set MODE = "run" -> run again. W/S = walk, A/D = turn, Shift = sprint.
 	  Stop: getgenv().ScarabStop() (or _G.ScarabStop())
 	SCALE = studs per model unit (0.08 -> ~54 studs wide / ~29 tall). It must be the SAME in build and run.
